@@ -11,7 +11,8 @@ import matplotlib.pyplot as plt
 from src.step_utils import (update_network_weights, inner_update_steps,
                         update_model_single, update_model, N_samples,
                         test_inner_steps, render_fn, psnr_fn,
-                        batch_size, model, params, opt_state, inner_step_size, lr)
+                        batch_size, model, inner_step_size, lr)
+import src.step_utils as step_utils
 
 from src.data_utils import DATASET, get_example, imgfiles, posedata, poses_avg, render_path_spiral, get_rays
 
@@ -19,7 +20,6 @@ from src.data_utils import DATASET, get_example, imgfiles, posedata, poses_avg, 
 def train(
     max_iters: int = 150000, 
     ):
-
     exp_name = f'{DATASET}_ius_{inner_update_steps}_ilr_{inner_step_size}_olr_{lr}_bs_{batch_size}'
     exp_dir = f'checkpoint/phototourism_checkpoints/{exp_name}/'
 
@@ -54,10 +54,12 @@ def train(
         if inner_update_steps == 1:
             rng, rng_input = random.split(rng)
             idx = random.randint(rng_input, shape=(batch_size,), minval=0, maxval=images.shape[0])
-            rng, params, opt_state, loss = update_model_single(step, rng, params, opt_state,
-                                                            images[idx, :], rays[:, idx, :], bds)
+            rng, params, opt_state, loss = update_model_single(step, rng, step_utils.params,
+                                                               step_utils.opt_state,
+                                                               images[idx, :], rays[:, idx, :], bds)
         else:
-            rng, params, opt_state, loss = update_model(step, rng, params, opt_state,
+            rng, params, opt_state, loss = update_model(step, rng, step_utils.params,
+                                                        step_utils.opt_state,
                                                         images, rays, bds)
 
         train_psnrs.append(-10 * np.log10(loss))
