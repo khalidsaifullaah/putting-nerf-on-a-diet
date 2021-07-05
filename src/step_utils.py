@@ -2,9 +2,8 @@ import jax
 import jax.numpy as np
 from jax import jit, random
 from jax.experimental import optimizers
-import haiku as hk
 
-from models import Model
+from src.models import Model
 
 
 lr = 5e-4
