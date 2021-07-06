@@ -40,7 +40,7 @@ def pose_spherical(theta, phi, radius):
     return c2w
 
 def get_rays(H, W, focal, c2w):
-    i, j = np.meshgrid(np.arange(W, step = step), np.arange(H, step = step), indexing='xy')
+    i, j = np.meshgrid(np.arange(W), np.arange(H), indexing='xy')
     dirs = np.stack([(i-W*.5)/focal, -(j-H*.5)/focal, -np.ones_like(i)], -1)
     rays_d = np.sum(dirs[..., np.newaxis, :] * c2w[:3,:3], -1)
     rays_o = np.broadcast_to(
@@ -48,9 +48,10 @@ def get_rays(H, W, focal, c2w):
     return np.stack([rays_o, rays_d], 0)
 
 def random_pose(rng, bds):
-    radius = random.uniform(rng, minval = bds[0], maxval = bds[1])
-    theta = random.uniform(rng, minval = 0, maxval = 2*np.pi)
-    phi = random.uniform(rng, minval = 0, maxval = np.pi/2)
+    rng, *rng_inputs = jax.random.split(rng, 3)
+    radius = random.uniform(rng_inputs[1], minval = bds[0], maxval = bds[1])
+    theta = random.uniform(rng_inputs[1], minval = 0, maxval = 2*np.pi)
+    phi = random.uniform(rng_inputs[1], minval = 0, maxval = np.pi/2)
     return pose_spherical(radius,theta,phi)
 
 def CLIPProcessor(image):
@@ -67,8 +68,8 @@ def CLIPProcessor(image):
 
 def SC_loss(rng_inputs, model, params, target_img, target_emb, rays, l):
     '''
-        target_emb [B, D]: pre-computed target embedding vector \phi(I)
-        source_img [B, 3, H, W]: source image \hat{I}
+        target_emb [1, D]: pre-computed target embedding vector \phi(I)
+        source_img [1, 3, H, W]: source image \hat{I}
         l: loss weight lambda
         return: SC_loss
     '''
@@ -77,32 +78,34 @@ def SC_loss(rng_inputs, model, params, target_img, target_emb, rays, l):
     source_img = CLIPProcessor(source_img)
     source_emb = CLIP_model.get_image_features(pixel_values=source_img)
     source_emb /= np.linalg.norm(source_emb, axis=-1, keepdims=True)
-    return l/2 * ((target_emb - source_emb)**2).sum()/source_emb.shape[0]
+    return l/2 * np.sum((source_emb - target_emb)**2)/source_emb.shape[0]
 
 # update inner model network weights with once step of sgd
 @jit
-def single_step(rng, images, rays, params, target_emb, step):
+def single_step(rng, images, pixel_rays, params, target_emb, random_rays, step):
+    '''
+        target_emb [1, D]: pre-computed target embedding vector \phi(I)
+        rays [2, H*W, 3]: random rays to render random view image.
+        step []: current step
+    '''
     def sgd(param, update):
         return param - inner_step_size * update
 
     def loss_fn(params, rng_inputs):
         pixels = np.reshape(images, [-1,3])
-        pixel_rays = np.reshape(rays, (2,-1,3))
         idx = random.randint(rng_inputs[0], shape=(batch_size,), minval=0, maxval=pixels.shape[0])
         pixel_sub = pixels[idx,:]
         pixel_ray_sub = pixel_rays[:,idx,:]
 
         idx = random.randint(rng_inputs[0], shape=(1,), minval=0, maxval=images.shape[0])
         image_sub = images[idx]
-        target_emb_sub = target_emb[idx,:] 
-        ray_sub = np.reshape(rays[:,idx][:,:,::2,::2], [2,-1,3])
+        target_emb_sub = target_emb[idx,:]
 
-        
         g = render_rays(rng_inputs[1], model, params, pixel_ray_sub, N_samples, rand=True)
         L = mse_fn(g, pixel_sub)
 
         L = jax.lax.cond(step%K == 0,
-            lambda _: L + SC_loss(rng_inputs, model, params, image_sub, target_emb_sub, ray_sub, 1),
+            lambda _: L + SC_loss(rng_inputs, model, params, image_sub, target_emb_sub, random_rays, 1),
             lambda _: L, 
             operand=None
         )
@@ -114,14 +117,14 @@ def single_step(rng, images, rays, params, target_emb, step):
     return rng, params, loss
 
 # update inner model network weights inner_update_steps number of times
-def update_network_weights(rng, images, rays, params, target_emb, step):
+def update_network_weights(rng, images, rays, params, target_emb, random_rays, step):
     for _ in range(inner_update_steps):
-        rng, params, loss = single_step(rng, images, rays, params, target_emb, step)
+        rng, params, loss = single_step(rng, images, rays, params, target_emb, random_rays, step)
     return rng, params, loss
 
 # update meta model weights based on trained inner model weights
-def update_model(rng, params, images, rays, target_emb, step):
-    rng, new_params, model_loss = update_network_weights(rng, images, rays, params, target_emb, step)
+def update_model(rng, params, images, rays, target_emb, random_rays, step):
+    rng, new_params, model_loss = update_network_weights(rng, images, rays, params, target_emb, random_rays, step)
 
 '''
 rng = jax.random.PRNGKey(0)
@@ -135,6 +138,7 @@ target_emb = CLIP_model.get_image_features(pixel_values=target_images)
 target_emb /= np.linalg.norm(target_emb, axis=-1, keepdims=True)
 
 for step in tqdm(range(2)):
-    rays = get_ray_batch(hwf[0], hwf[1], hwf[2], train_poses)
-    update_model(rng, params, train_images, rays, target_emb, step)
+    rays = np.reshape(get_ray_batch(hwf[0], hwf[1], hwf[2], train_poses), [2,-1,3])
+    random_rays = np.reshape(get_rays(hwf[0], hwf[1], hwf[2], random_pose(rng, [1,1]))[:,::2,::2], [2,-1,3]) # to reduce memory cost sampling is required.
+    update_model(rng, params, train_images, rays, target_emb, random_rays, step)
 '''
